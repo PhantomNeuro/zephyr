@@ -690,14 +690,13 @@ static inline void mcux_i3c_request_emit_stop(struct mcux_i3c_data *dev_data,
 		mcux_i3c_errwarn_clear_all_nowait(base);
 	}
 
-	/* Make sure we are in a state where we can emit STOP */
-	if (!reg32_test_match(&base->MSTATUS, I3C_MSTATUS_STATE_MASK,
-			      I3C_MSTATUS_STATE_NORMACT)) {
-		return;
-	}
-
 	retries = 0;
 	while (1) {
+		/* Make sure we are in a state where we can emit STOP */
+		if (!reg32_test_match(&base->MSTATUS, I3C_MSTATUS_STATE_MASK,
+					I3C_MSTATUS_STATE_NORMACT)) {
+			return;
+		}
 		int err = mcux_i3c_do_request_emit_stop(base, wait_stop);
 
 		if (err) {
