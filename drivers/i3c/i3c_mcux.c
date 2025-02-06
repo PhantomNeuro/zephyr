@@ -1828,7 +1828,26 @@ static void mcux_i3c_isr(const struct device *dev)
 		}
 	}
 #else
-	ARG_UNUSED(dev);
+	const struct mcux_i3c_config *config = dev->config;
+	I3C_Type *base = config->base;
+	/* clear the flag still */
+	if (mcux_i3c_status_is_set(base, I3C_MSTATUS_SLVSTART_MASK)) {
+		
+		/* Clear SLVSTART interrupt */
+		base->MSTATUS = I3C_MSTATUS_SLVSTART_MASK;
+
+		/*
+		 * Disable further target initiated IBI interrupt
+		 * while we try to service the current one.
+		 */
+		base->MINTCLR = I3C_MINTCLR_SLVSTART_MASK;
+
+		LOG_WRN("IBI isr triggered while CONFIG_I3C_USE_IBI=n...clearing it");
+	} else {
+		uint32_t mstatus;
+		mstatus = base->MSTATUS;
+		LOG_DBG("ISR Triggered for unhandled reason, status=0x%08x", mstatus);
+	}
 #endif
 }
 
