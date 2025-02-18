@@ -640,6 +640,7 @@ static inline int mcux_i3c_do_request_emit_stop(I3C_Type *base, bool wait_stop)
 		 * If there is an incoming IBI, it will get stuck forever
 		 * as state would be I3C_MSTATUS_STATE_SLVREQ.
 		 */
+		int stop_tries = 0;
 		while (reg32_test_match(&base->MSTATUS, I3C_MSTATUS_STATE_MASK,
 					I3C_MSTATUS_STATE_NORMACT)) {
 			if (mcux_i3c_has_error(base)) {
@@ -657,6 +658,12 @@ static inline int mcux_i3c_do_request_emit_stop(I3C_Type *base, bool wait_stop)
 				return -EIO;
 			}
 			k_busy_wait(10);
+			stop_tries++;
+			if (stop_tries > 10000){
+				LOG_ERR("Tried to emit stop 10000times");
+				stop_tries = 0;
+				k_msleep(1000);
+			}
 		}
 	}
 	return 0;
