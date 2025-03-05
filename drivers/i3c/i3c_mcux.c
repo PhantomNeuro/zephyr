@@ -235,9 +235,11 @@ static void mcux_i3c_interrupt_enable(I3C_Type *base, uint32_t mask)
  */
 static bool mcux_i3c_has_error(I3C_Type *base)
 {
-	uint32_t mstatus, merrwarn;
+	uint32_t mstatus, merrwarn, mctrl;
+	
 
 	mstatus = base->MSTATUS;
+	mctrl = base->MCTRL;
 	if ((mstatus & I3C_MSTATUS_ERRWARN_MASK) == I3C_MSTATUS_ERRWARN_MASK) {
 		merrwarn = base->MERRWARN;
 
@@ -247,8 +249,8 @@ static bool mcux_i3c_has_error(I3C_Type *base)
 		 * printing any error messages should be handled in
 		 * callers of this function.
 		 */
-		LOG_DBG("ERROR: MSTATUS 0x%08x MERRWARN 0x%08x",
-			mstatus, merrwarn);
+		LOG_DBG("ERROR: MCTRL 0x%08x MSTATUS 0x%08x MERRWARN 0x%08x",
+			mctrl, mstatus, merrwarn);
 
 		return true;
 	}
@@ -568,6 +570,57 @@ static inline void mcux_i3c_wait_idle(struct mcux_i3c_data *dev_data, I3C_Type *
 }
 
 /**
+ * @brief Tell controller to flush both TX and RX FIFOs.
+ *
+ * @param base Pointer to controller registers.
+ */
+static inline void mcux_i3c_fifo_flush(I3C_Type *base)
+{
+	base->MDATACTRL = I3C_MDATACTRL_FLUSHFB_MASK | I3C_MDATACTRL_FLUSHTB_MASK;
+}
+
+/**
+ * @brief Prepare the controller for transfers.
+ *
+ * This is simply a wrapper to clear out status bits,
+ * and error bits. Also this tells the controller to
+ * flush both TX and RX FIFOs.
+ *
+ * @param base Pointer to controller registers.
+ */
+static inline void mcux_i3c_xfer_reset(I3C_Type *base)
+{
+	mcux_i3c_status_clear_all(base);
+	mcux_i3c_errwarn_clear_all_nowait(base);
+	mcux_i3c_fifo_flush(base);
+}
+
+/**
+ * @brief Drain RX FIFO.
+ *
+ * @param dev Pointer to controller device driver instance.
+ */
+static void mcux_i3c_fifo_rx_drain(const struct device *dev)
+{
+	const struct mcux_i3c_config *config = dev->config;
+	I3C_Type *base = config->base;
+	uint8_t buf;
+
+	/* Read from FIFO as long as RXPEND is set. */
+	while (mcux_i3c_status_is_set(base, I3C_MSTATUS_RXPEND_MASK)) {
+		buf = base->MRDATAB;
+	}
+}
+
+static void mcux_i3c_fifi_rx_drain_base(I3C_Type *base){
+	/* Read from FIFO as long as RXPEND is set. */
+	uint8_t buf;
+	while (mcux_i3c_status_is_set(base, I3C_MSTATUS_RXPEND_MASK)) {
+		buf = base->MRDATAB;
+	}
+}
+
+/**
  * @brief Tell controller to emit START.
  *
  * @param base Pointer to controller registers.
@@ -660,12 +713,40 @@ static inline int mcux_i3c_do_request_emit_stop(I3C_Type *base, bool wait_stop)
 			k_busy_wait(10);
 			stop_tries++;
 			if (stop_tries > 10000){
-				LOG_ERR("Tried to emit stop 10000times");
+				uint32_t mstatus, merrwarn, ibirules, mctrl;
+				int err;
+				mstatus = base->MSTATUS;
+				merrwarn = base->MERRWARN;
+				ibirules = base->MIBIRULES;
+				mctrl = base->MCTRL;
+				LOG_ERR("Tried to emit stop 10000times..clearing all! MCTRL 0x%08x MSTATUS 0x%08x MERRWARN 0x%08x MIBIRULES 0x%08x",
+					mctrl, mstatus, merrwarn, ibirules);
 				stop_tries = 0;
 				k_msleep(1000);
+				// mcux_i3c_xfer_reset(base); //clear and flush fifo
+				mcux_i3c_fifi_rx_drain_base(base); //suggestion from nxp
+				mcux_i3c_fifo_flush(base);
+
+				LOG_ERR("FORCE EXIT"); //have not seeing this work
+				reg32_update(&base->MCTRL,
+					I3C_MCTRL_REQUEST_MASK | I3C_MCTRL_DIR_MASK | I3C_MCTRL_RDTERM_MASK,
+					I3C_MCTRL_REQUEST_FORCE_EXIT);
+				k_msleep(100);
+
+				//same mask as clear all but no inf busy wait
+				uint32_t clear_mask = I3C_MSTATUS_MCTRLDONE_MASK |
+					I3C_MSTATUS_COMPLETE_MASK |
+					I3C_MSTATUS_IBIWON_MASK |
+					I3C_MSTATUS_ERRWARN_MASK;
+				if((err = mcux_i3c_status_clear_timeout(base, clear_mask, 1000)) != 0){  //clear all with wait 1ms
+					LOG_WRN("timeout clearing status mask = 0x%08x", clear_mask);
+				};
+				LOG_WRN("EMIT STOP return timeout");
+				return -ETIMEDOUT;
 			}
 		}
 	}
+	// LOG_WRN("EMIT STOP SUCCESS");
 	return 0;
 }
 
@@ -773,48 +854,7 @@ static inline int mcux_i3c_fifo_rx_count_get(I3C_Type *base)
 	return (int)((mdatactrl & I3C_MDATACTRL_RXCOUNT_MASK) >> I3C_MDATACTRL_RXCOUNT_SHIFT);
 }
 
-/**
- * @brief Tell controller to flush both TX and RX FIFOs.
- *
- * @param base Pointer to controller registers.
- */
-static inline void mcux_i3c_fifo_flush(I3C_Type *base)
-{
-	base->MDATACTRL = I3C_MDATACTRL_FLUSHFB_MASK | I3C_MDATACTRL_FLUSHTB_MASK;
-}
 
-/**
- * @brief Prepare the controller for transfers.
- *
- * This is simply a wrapper to clear out status bits,
- * and error bits. Also this tells the controller to
- * flush both TX and RX FIFOs.
- *
- * @param base Pointer to controller registers.
- */
-static inline void mcux_i3c_xfer_reset(I3C_Type *base)
-{
-	mcux_i3c_status_clear_all(base);
-	mcux_i3c_errwarn_clear_all_nowait(base);
-	mcux_i3c_fifo_flush(base);
-}
-
-/**
- * @brief Drain RX FIFO.
- *
- * @param dev Pointer to controller device driver instance.
- */
-static void mcux_i3c_fifo_rx_drain(const struct device *dev)
-{
-	const struct mcux_i3c_config *config = dev->config;
-	I3C_Type *base = config->base;
-	uint8_t buf;
-
-	/* Read from FIFO as long as RXPEND is set. */
-	while (mcux_i3c_status_is_set(base, I3C_MSTATUS_RXPEND_MASK)) {
-		buf = base->MRDATAB;
-	}
-}
 
 /**
  * @brief Find a registered I3C target device.
@@ -920,6 +960,8 @@ static int mcux_i3c_do_one_xfer_read(I3C_Type *base, uint8_t *buf, uint8_t buf_s
 		 */
 		if (mcux_i3c_has_error(base)) {
 			if (mcux_i3c_error_is_timeout(base)) {
+				LOG_WRN("Flushing fifo due to timeout");
+				mcux_i3c_fifo_flush(base); //nxp succestion to add
 				ret = -ETIMEDOUT;
 			}
 			/* clear error  */
@@ -1036,6 +1078,7 @@ static int mcux_i3c_do_one_xfer(I3C_Type *base, struct mcux_i3c_data *data,
 	}
 
 	if (ret < 0) {
+		LOG_WRN("ERROR from transfer read=%d, error=%d", is_read, ret);
 		goto out_one_xfer;
 	}
 
