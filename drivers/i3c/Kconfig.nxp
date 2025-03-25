@@ -17,3 +17,12 @@ config I3C_MCUX
 	default y
 	help
 	  Enable mcux I3C driver.
+
+config I3C_MCUX_GPIO_DGB
+	bool "MCUX I3C debugging with some GPIO"
+	depends on HAS_MCUX
+	depends on DT_HAS_NXP_MCUX_I3C_ENABLED
+	select PINCTRL
+	default n
+	help
+	  Enable mcux I3C driver debugging with GPIOs.
