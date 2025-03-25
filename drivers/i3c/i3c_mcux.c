@@ -29,6 +29,27 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(i3c_mcux, CONFIG_I3C_MCUX_LOG_LEVEL);
 
+//Phantom Debug
+
+#ifdef CONFIG_I3C_MCUX_GPIO_DGB
+	#define GPIO_DBG_SET(d, s) gpio_pin_set_dt(&d, s); 
+#else 
+	#define GPIO_DBG_SET(d, s) ((void)0);
+#endif
+
+
+
+
+#ifdef CONFIG_I3C_MCUX_GPIO_DGB
+#include <zephyr/drivers/gpio.h>
+
+static const struct gpio_dt_spec dbg_0 = GPIO_DT_SPEC_GET(DT_NODELABEL(debug_out_0), gpios);
+static const struct gpio_dt_spec dbg_1 = GPIO_DT_SPEC_GET(DT_NODELABEL(debug_out_1), gpios);
+static const struct gpio_dt_spec dbg_2 = GPIO_DT_SPEC_GET(DT_NODELABEL(debug_out_2), gpios);
+
+#endif
+//END Phantom Debug
+
 #define I3C_MCTRL_REQUEST_NONE			I3C_MCTRL_REQUEST(0)
 #define I3C_MCTRL_REQUEST_EMIT_START_ADDR	I3C_MCTRL_REQUEST(1)
 #define I3C_MCTRL_REQUEST_EMIT_STOP		I3C_MCTRL_REQUEST(2)
@@ -952,17 +973,23 @@ static int mcux_i3c_do_one_xfer_read(I3C_Type *base, uint8_t *buf, uint8_t buf_s
 			if (mcux_i3c_fifo_rx_count_get(base) == 0) {
 				break;
 			}
+			GPIO_DBG_SET(dbg_1, 1);
 			buf[offset++] = (uint8_t)base->MRDATAB;
+			GPIO_DBG_SET(dbg_1, 0);
 		}
-
 		/*
 		 * If controller says timed out, we abort the transaction.
 		 */
+
 		if (mcux_i3c_has_error(base)) {
 			if (mcux_i3c_error_is_timeout(base)) {
-				LOG_WRN("Flushing fifo due to timeout");
+				LOG_DBG("Flushing fifo due to timeout offset=%d, buf_sz=%d", offset, buf_sz);
 				mcux_i3c_fifo_flush(base); //nxp succestion to add
-				ret = -ETIMEDOUT;
+				if (buf_sz > 0 && buf_sz == offset && buf_sz <= 16){ //assuming 16bytes of FIFO
+					LOG_DBG("Ignoring the timeout because we still read all %d bytes of the data", buf_sz);
+				} else {
+					ret = -ETIMEDOUT;
+				}
 			}
 			/* clear error  */
 			base->MERRWARN = base->MERRWARN;
@@ -976,7 +1003,7 @@ static int mcux_i3c_do_one_xfer_read(I3C_Type *base, uint8_t *buf, uint8_t buf_s
 				break;
 			} else {
 				if (ret == -ETIMEDOUT) {
-					LOG_ERR("Timeout error");
+					LOG_ERR("IBI Timeout error");
 				}
 				goto one_xfer_read_out;
 			}
@@ -1053,6 +1080,7 @@ static int mcux_i3c_do_one_xfer(I3C_Type *base, struct mcux_i3c_data *data,
 				bool no_ending)
 {
 	int ret = 0;
+	int key = 0;
 
 	mcux_i3c_status_clear_all(base);
 	mcux_i3c_errwarn_clear_all_nowait(base);
@@ -1071,6 +1099,8 @@ static int mcux_i3c_do_one_xfer(I3C_Type *base, struct mcux_i3c_data *data,
 		goto out_one_xfer;
 	}
 
+	GPIO_DBG_SET(dbg_2, 1);
+	key = irq_lock();
 	if (is_read) {
 		ret = mcux_i3c_do_one_xfer_read(base, buf, buf_sz, false);
 	} else {
@@ -1078,6 +1108,9 @@ static int mcux_i3c_do_one_xfer(I3C_Type *base, struct mcux_i3c_data *data,
 	}
 
 	if (ret < 0) {
+		GPIO_DBG_SET(dbg_0, 1);
+		__asm("nop");
+		GPIO_DBG_SET(dbg_0, 0);
 		LOG_WRN("ERROR from transfer read=%d, error=%d", is_read, ret);
 		goto out_one_xfer;
 	}
@@ -1098,10 +1131,23 @@ static int mcux_i3c_do_one_xfer(I3C_Type *base, struct mcux_i3c_data *data,
 	}
 
 	if (mcux_i3c_has_error(base)) {
-		ret = -EIO;
+		if (reg32_test(&base->MERRWARN, I3C_MERRWARN_TIMEOUT_MASK)) {
+			// GPIO_DBG_SET(dbg_0, 1);
+			// __asm("nop");
+			// GPIO_DBG_SET(dbg_0, 0);
+			LOG_DBG("Ignoreing timeout after transaction has finished");
+			mcux_i3c_errwarn_clear_all_nowait(base);
+			// ret = -ETIMEDOUT;
+		} else {
+			ret = -EIO;
+		}
 	}
 
 out_one_xfer:
+	// k_sched_unlock();
+	irq_unlock(key);
+	GPIO_DBG_SET(dbg_2, 0);
+
 	if (emit_stop) {
 		mcux_i3c_request_emit_stop(data, base, true);
 	}
@@ -2031,6 +2077,21 @@ static int mcux_i3c_init(const struct device *dev)
 	if (ret != 0) {
 		goto err_out;
 	}
+
+	//Phantom debug init
+#ifdef CONFIG_I3C_MCUX_GPIO_DGB
+	if (!device_is_ready(dbg_0.port) || !device_is_ready(dbg_1.port) || !device_is_ready(dbg_2.port)) {
+		LOG_ERR("Phantom Debug outputs not ready!");
+	} else {
+		if( gpio_pin_configure_dt(&dbg_0, GPIO_OUTPUT_INACTIVE) < 0 
+			|| gpio_pin_configure_dt(&dbg_1, GPIO_OUTPUT_INACTIVE) < 0 
+			|| gpio_pin_configure_dt(&dbg_2, GPIO_OUTPUT_INACTIVE) < 0 ){
+			LOG_ERR("Phantom Debug could not configure outputs");
+		}
+	}
+
+#endif
+	//END Phantom debug init
 
 	k_mutex_init(&data->lock);
 	k_condvar_init(&data->condvar);
