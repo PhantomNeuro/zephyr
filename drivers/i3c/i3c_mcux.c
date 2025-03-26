@@ -748,11 +748,11 @@ static inline int mcux_i3c_do_request_emit_stop(I3C_Type *base, bool wait_stop)
 				mcux_i3c_fifi_rx_drain_base(base); //suggestion from nxp
 				mcux_i3c_fifo_flush(base);
 
-				LOG_ERR("FORCE EXIT"); //have not seeing this work
-				reg32_update(&base->MCTRL,
-					I3C_MCTRL_REQUEST_MASK | I3C_MCTRL_DIR_MASK | I3C_MCTRL_RDTERM_MASK,
-					I3C_MCTRL_REQUEST_FORCE_EXIT);
-				k_msleep(100);
+				// LOG_ERR("FORCE EXIT"); //have not seeing this work
+				// reg32_update(&base->MCTRL,
+				// 	I3C_MCTRL_REQUEST_MASK | I3C_MCTRL_DIR_MASK | I3C_MCTRL_RDTERM_MASK,
+				// 	I3C_MCTRL_REQUEST_FORCE_EXIT);
+				// k_msleep(100);
 
 				//same mask as clear all but no inf busy wait
 				uint32_t clear_mask = I3C_MSTATUS_MCTRLDONE_MASK |
@@ -810,6 +810,9 @@ static inline void mcux_i3c_request_emit_stop(struct mcux_i3c_data *dev_data,
 
 		if (err) {
 			if ((err == -ETIMEDOUT) && (++retries <= I3C_MAX_STOP_RETRIES)) {
+				GPIO_DBG_SET(dbg_0, 1);
+				__asm("nop");
+				GPIO_DBG_SET(dbg_0, 0);
 				LOG_WRN("Timeout on emit stop, retrying");
 				continue;
 			}
@@ -1003,7 +1006,7 @@ static int mcux_i3c_do_one_xfer_read(I3C_Type *base, uint8_t *buf, uint8_t buf_s
 				break;
 			} else {
 				if (ret == -ETIMEDOUT) {
-					LOG_ERR("IBI Timeout error");
+					LOG_ERR("do_one_xfer_read Timeout error");
 				}
 				goto one_xfer_read_out;
 			}
@@ -1137,6 +1140,7 @@ static int mcux_i3c_do_one_xfer(I3C_Type *base, struct mcux_i3c_data *data,
 			// GPIO_DBG_SET(dbg_0, 0);
 			LOG_DBG("Ignoreing timeout after transaction has finished");
 			mcux_i3c_errwarn_clear_all_nowait(base);
+			// mcux_i3c_recover_bus(base);
 			// ret = -ETIMEDOUT;
 		} else {
 			ret = -EIO;
