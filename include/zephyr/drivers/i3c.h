@@ -850,6 +850,8 @@ __subsystem struct i3c_driver_api {
 #endif /* CONFIG_I3C_RTIO */
 
 #ifdef CONFIG_I3C_HW_RECOVER
+
+
 	/**
 	 *
 	 * recover the hardware
