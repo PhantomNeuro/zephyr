@@ -824,8 +824,6 @@ __subsystem struct i3c_driver_api {
 	void (*iodev_submit)(const struct device *dev,
 				 struct rtio_iodev_sqe *iodev_sqe);
 #endif
-
-#ifdef CONFIG_I3C_HW_RECOVER
 	/**
 	 *
 	 * recover the hardware
@@ -835,7 +833,6 @@ __subsystem struct i3c_driver_api {
 	 * @return See i3c_recover_bus()
 	 */
 	int (*hw_recover)(const struct device *dev);
-#endif
 };
 
 /**
