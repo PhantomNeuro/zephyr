@@ -125,6 +125,13 @@ config I3C_RTIO
 	help
 	  API and implementations of I3C for RTIO
 
+config I3C_HW_RECOVER
+	bool "I3C Reover hardware API"
+	select EXPERIMENTAL
+	help
+	  API and implementations of i3c recoverint hardware
+
+
 if I3C_RTIO
 config I3C_RTIO_SQ_SIZE
 	int "Submission queue size for blocking calls"

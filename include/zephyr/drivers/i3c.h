@@ -824,6 +824,18 @@ __subsystem struct i3c_driver_api {
 	void (*iodev_submit)(const struct device *dev,
 				 struct rtio_iodev_sqe *iodev_sqe);
 #endif
+
+#ifdef CONFIG_I3C_HW_RECOVER
+	/**
+	 *
+	 * recover the hardware
+	 * 
+	 * @param dev Pointer to controller device driver instance.
+	 *
+	 * @return See i3c_recover_bus()
+	 */
+	int (*hw_recover)(const struct device *dev);
+#endif
 };
 
 /**
@@ -1365,6 +1377,28 @@ static inline int i3c_recover_bus(const struct device *dev)
 	}
 
 	return api->recover_bus(dev);
+}
+
+/**
+ * @brief Attempt bus recovery on the I3C bus with ahrdware.
+ *
+ * This routine asks the controller to attempt bus recovery.
+ *
+ * @retval 0 If successful.
+ * @retval -EBUSY If bus recovery fails.
+ * @retval -EIO General input / output error.
+ * @retval -ENOSYS Bus recovery is not supported by the controller driver.
+ */
+static inline int i3c_hw_recover_bus(const struct device *dev)
+{
+	const struct i3c_driver_api *api =
+		(const struct i3c_driver_api *)dev->api;
+
+	if (api->hw_recover == NULL) {
+		return -ENOSYS;
+	}
+
+	return api->hw_recover(dev);
 }
 
 /**
