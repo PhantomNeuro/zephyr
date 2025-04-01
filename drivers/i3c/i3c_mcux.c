@@ -652,36 +652,6 @@ static void mcux_i3c_fifi_rx_drain_base(I3C_Type *base){
 	}
 }
 
-// static int pnx_mcux_i3c_hw_recovery(const struct device *dev){
-// 	const struct mcux_i3c_config *config = dev->config;
-
-// 	int ret = 0;
-// 	LOG_DBG("Setting i3c in gpio mode PINCTRL_STATE_SLEEP");
-// 	ret = pinctrl_apply_state(config->pincfg, PINCTRL_STATE_SLEEP);
-// 	if (ret != 0) {
-// 		LOG_ERR("Could not update state to recovery/sleep mode = %d", ret);
-// 		return -1;
-// 	}
-
-// 	return ret;
-// }
-
-
-// static int pnx_mcux_i3c_default(const struct device *dev){
-// 	const struct mcux_i3c_config *config = dev->config;
-
-// 	int ret = 0;
-// 	LOG_DBG("Setting i3c in gpio mode PINCTRL_STATE_DEFAULT");
-// 	ret = pinctrl_apply_state(config->pincfg, PINCTRL_STATE_DEFAULT);
-// 	if (ret != 0) {
-// 		LOG_ERR("Could not update state to Default mode = %d", ret);
-// 		return -1;
-// 	}
-
-// 	return ret;
-// }
-
-
 /**
  * @brief Tell controller to emit START.
  *
@@ -776,35 +746,17 @@ static inline int mcux_i3c_do_request_emit_stop(I3C_Type *base, bool wait_stop)
 			stop_tries++;
 			if (stop_tries > 10000){
 				uint32_t mstatus, merrwarn, ibirules, mctrl;
-				int err;
 				mstatus = base->MSTATUS;
 				merrwarn = base->MERRWARN;
 				ibirules = base->MIBIRULES;
 				mctrl = base->MCTRL;
-				LOG_ERR("Emit stop stuck in NORMACT! MCTRL 0x%08x MSTATUS 0x%08x MERRWARN 0x%08x MIBIRULES 0x%08x",
+				LOG_DBG("Emit stop stuck in NORMACT! MCTRL 0x%08x MSTATUS 0x%08x MERRWARN 0x%08x MIBIRULES 0x%08x",
 					mctrl, mstatus, merrwarn, ibirules);
 				stop_tries = 0;
-				k_msleep(1000);
-				// mcux_i3c_xfer_reset(base); //clear and flush fifo
+				k_msleep(100);
 				mcux_i3c_fifi_rx_drain_base(base); //suggestion from nxp
 				mcux_i3c_fifo_flush(base);
-
-				// LOG_ERR("FORCE EXIT"); //have not seeing this work
-				// reg32_update(&base->MCTRL,
-				// 	I3C_MCTRL_REQUEST_MASK | I3C_MCTRL_DIR_MASK | I3C_MCTRL_RDTERM_MASK,
-				// 	I3C_MCTRL_REQUEST_FORCE_EXIT);
-				// k_msleep(100);
-
-				//same mask as clear all but no inf busy wait
-				//removed 4/1
-				// uint32_t clear_mask = I3C_MSTATUS_MCTRLDONE_MASK |
-				// 	I3C_MSTATUS_COMPLETE_MASK |
-				// 	I3C_MSTATUS_IBIWON_MASK |
-				// 	I3C_MSTATUS_ERRWARN_MASK;
-				// if((err = mcux_i3c_status_clear_timeout(base, clear_mask, 1000)) != 0){  //clear all with wait 1ms
-				// 	LOG_WRN("timeout clearing status mask = 0x%08x", clear_mask);
-				// };
-				LOG_WRN("EMIT STOP return EHOSTDOWN");
+				// LOG_WRN("EMIT STOP return EHOSTDOWN");
 				return -EHOSTDOWN;
 			}
 		}
@@ -855,7 +807,7 @@ static inline int mcux_i3c_request_emit_stop(struct mcux_i3c_data *dev_data,
 				GPIO_DBG_SET(dbg_0, 1);
 				__asm("nop");
 				GPIO_DBG_SET(dbg_0, 0);
-				LOG_WRN("Timeout on emit stop, retrying");
+				LOG_DBG("Timeout on emit stop, retrying");
 				continue;
 			}
 
@@ -863,7 +815,7 @@ static inline int mcux_i3c_request_emit_stop(struct mcux_i3c_data *dev_data,
 				LOG_ERR("Error waiting for stop EHOSTDOWN");
 				return -EHOSTDOWN;
 			} else {
-				LOG_ERR("Error waiting for stop ETIMEDOUT");
+				LOG_DBG("Error waiting for stop ETIMEDOUT");
 				return -ETIMEDOUT;
 			}
 
@@ -873,7 +825,7 @@ static inline int mcux_i3c_request_emit_stop(struct mcux_i3c_data *dev_data,
 		 * be IDLE or possibly SLVREQ.
 		 */
 		if (retries) {
-			LOG_WRN("EMIT_STOP succeeded on %u retries", retries);
+			LOG_DBG("EMIT_STOP succeeded on %u retries", retries);
 		}
 		break;
 	}
@@ -961,8 +913,6 @@ static int mcux_i3c_recover_bus(const struct device *dev)
 	I3C_Type *base = config->base;
 	int ret = 0;
 
-	// pnx_mcux_i3c_recover_bus(dev);
-
 	/*
 	 * If the controller is in NORMACT state, tells it to emit STOP
 	 * so it can return to IDLE, or is ready to clear any pending
@@ -970,6 +920,7 @@ static int mcux_i3c_recover_bus(const struct device *dev)
 	 */
 	if (mcux_i3c_state_get(base) == I3C_MSTATUS_STATE_NORMACT) {
 		if (mcux_i3c_request_emit_stop(dev->data, base, true) == -EHOSTDOWN){
+			//TODO this is recursive??
 			LOG_ERR("mcux_i3c_recover_bus blocked emmitting stop EHOSTDOWN!...HW recover");
 			i3c_hw_recover_bus(dev);
 			LOG_ERR("attempting emit stop again");
@@ -1063,7 +1014,7 @@ static int mcux_i3c_do_one_xfer_read(I3C_Type *base, uint8_t *buf, uint8_t buf_s
 				break;
 			} else {
 				if (ret == -ETIMEDOUT) {
-					LOG_ERR("do_one_xfer_read Timeout error");
+					LOG_DBG("do_one_xfer_read Timeout error");
 				}
 				goto one_xfer_read_out;
 			}
@@ -1172,7 +1123,7 @@ static int mcux_i3c_do_one_xfer(I3C_Type *base, struct mcux_i3c_data *data,
 		GPIO_DBG_SET(dbg_0, 1);
 		__asm("nop");
 		GPIO_DBG_SET(dbg_0, 0);
-		LOG_WRN("ERROR from transfer read=%d, error=%d", is_read, ret);
+		LOG_WRN("error from transfer is_read=%d, ret=%d", is_read, ret);
 		goto out_one_xfer;
 	}
 
@@ -1212,12 +1163,12 @@ out_one_xfer:
 
 	if (emit_stop) {
 		if ((stop_err = mcux_i3c_request_emit_stop(data, base, true)) < 0){
-			LOG_ERR("STOP ERROR = %d", stop_err);
+			// LOG_ERR("STOP ERROR = %d", stop_err);
 			if (stop_err == -EHOSTDOWN){
-				LOG_WRN("RETURN EHOSTDOWN");
+				LOG_DBG("RETURN EHOSTDOWN");
 				ret = stop_err;
 			} else {
-				LOG_WRN("Don't return stop error return previous error = %d", ret);
+				LOG_DBG("Don't return stop error return previous error = %d", ret);
 			}
 		}
 	}
@@ -2266,17 +2217,7 @@ static int pnx_mcux_i3c_recover_bus(const struct device *dev)
 
 	LOG_WRN("pnx_mcux_i3c_recover_bus ... using i2c bus reovery!!!!");
 
-	//apply pinmux for recovery -> "sleep"
 	int ret = 0;
-
-	// if ((ret = device_deinit(dev)) != 0){
-	// 	LOG_ERR("Could de-initialize device err = %d", ret);
-	// }
-	// k_msleep(1);
-
-	// if((ret = pnx_mcux_i3c_hw_recovery(dev)) != 0){
-	// 	LOG_ERR("Could not change device states to recovery/sleep err = %d");
-	// }
 
 	k_msleep(1);
 
@@ -2326,12 +2267,10 @@ restore:
 
 	LOG_WRN("pnx_mcux_i3c_recover_bus .. Done i2c recovery!");
 
-	//2PM try re-init
 	if((error = mcux_i3c_init(dev)) != 0){
 		LOG_ERR("could not reiniitialize i3c device err = %d", error);
 	}
 	k_msleep(100);
-	//end 2PM
 
 	//Testing reg recovery
 	mcux_i3c_request_emit_stop(data, base, false);
@@ -2350,12 +2289,6 @@ restore:
 	} //end added 4/1
 	mcux_i3c_xfer_reset(base);
 	mcux_i3c_request_emit_stop(data, base, true);
-	// mcux_i3c_errwarn_clear_all_nowait(base);
-	// mcux_i3c_status_clear_all(base);
-	// mcux_i3c_fifi_rx_drain_base(base); //suggestion from nxp
-	// mcux_i3c_fifo_flush(base);
-
-
 
 	k_mutex_unlock(&data->lock);
 
