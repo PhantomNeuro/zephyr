@@ -26,3 +26,23 @@ config I3C_MCUX_GPIO_DGB
 	default n
 	help
 	  Enable mcux I3C driver debugging with GPIOs.
+
+config I3C_MCUX_GPIO_DGB_EN_REQ
+	bool "MCUX I3C debugging with some GPIO dbg_2 is used to enable other pins"
+	depends on HAS_MCUX
+	depends on DT_HAS_NXP_MCUX_I3C_ENABLED
+	depends on I3C_MCUX_GPIO_DGB
+	select PINCTRL
+	default n
+	help
+	  Enable mcux I3C driver debugging with GPIOs with enable line dbg_2
+
+config I3C_PNX_MCUX_BUS_RECOVERY
+	bool "Phantom Neuro X + MCUX I3C recovery"
+	depends on HAS_MCUX
+	depends on DT_HAS_NXP_MCUX_I3C_ENABLED
+	select PINCTRL
+	select I2C_BITBANG
+	default n
+	help
+	  Enable recovery of i3c using i2c bitbanging
