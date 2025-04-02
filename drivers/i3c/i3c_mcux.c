@@ -20,12 +20,6 @@
 
 #include <zephyr/drivers/pinctrl.h>
 
-#ifdef CONFIG_I3C_PNX_MCUX_BUS_RECOVERY
-#include "../i2c/i2c-priv.h"
-#include "../i2c/i2c_bitbang.h"
-#include <zephyr/drivers/gpio.h>
-#endif /* CONFIG_I3C_PNX_MCUX_BUS_RECOVERY */
-
 /*
  * This is from NXP HAL which contains register bits macros
  * which are used in this driver.
@@ -43,9 +37,6 @@ LOG_MODULE_REGISTER(i3c_mcux, CONFIG_I3C_MCUX_LOG_LEVEL);
 	#define GPIO_DBG_SET(d, s) ((void)0);
 #endif
 
-
-
-
 #ifdef CONFIG_I3C_MCUX_GPIO_DGB
 #include <zephyr/drivers/gpio.h>
 
@@ -55,6 +46,12 @@ static const struct gpio_dt_spec dbg_2 = GPIO_DT_SPEC_GET(DT_NODELABEL(debug_out
 
 #endif
 //END Phantom Debug
+
+#ifdef CONFIG_I3C_PNX_MCUX_BUS_RECOVERY
+#include "../i2c/i2c-priv.h"
+#include "../i2c/i2c_bitbang.h"
+#include <zephyr/drivers/gpio.h>
+#endif /* CONFIG_I3C_PNX_MCUX_BUS_RECOVERY */
 
 #define I3C_MCTRL_REQUEST_NONE			I3C_MCTRL_REQUEST(0)
 #define I3C_MCTRL_REQUEST_EMIT_START_ADDR	I3C_MCTRL_REQUEST(1)
