@@ -29,6 +29,30 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(i3c_mcux, CONFIG_I3C_MCUX_LOG_LEVEL);
 
+//Phantom Debug
+
+#ifdef CONFIG_I3C_MCUX_GPIO_DGB
+	#define GPIO_DBG_SET(d, s) gpio_pin_set_dt(&d, s); 
+#else 
+	#define GPIO_DBG_SET(d, s) ((void)0);
+#endif
+
+#ifdef CONFIG_I3C_MCUX_GPIO_DGB
+#include <zephyr/drivers/gpio.h>
+
+static const struct gpio_dt_spec dbg_0 = GPIO_DT_SPEC_GET(DT_NODELABEL(debug_out_0), gpios);
+static const struct gpio_dt_spec dbg_1 = GPIO_DT_SPEC_GET(DT_NODELABEL(debug_out_1), gpios);
+static const struct gpio_dt_spec dbg_2 = GPIO_DT_SPEC_GET(DT_NODELABEL(debug_out_2), gpios);
+
+#endif
+//END Phantom Debug
+
+#ifdef CONFIG_I3C_PNX_MCUX_BUS_RECOVERY
+#include "../i2c/i2c-priv.h"
+#include "../i2c/i2c_bitbang.h"
+#include <zephyr/drivers/gpio.h>
+#endif /* CONFIG_I3C_PNX_MCUX_BUS_RECOVERY */
+
 #define I3C_MCTRL_REQUEST_NONE			I3C_MCTRL_REQUEST(0)
 #define I3C_MCTRL_REQUEST_EMIT_START_ADDR	I3C_MCTRL_REQUEST(1)
 #define I3C_MCTRL_REQUEST_EMIT_STOP		I3C_MCTRL_REQUEST(2)
@@ -86,6 +110,11 @@ struct mcux_i3c_config {
 
 	/** Disable open drain high push pull */
 	bool disable_open_drain_high_pp;
+
+#ifdef CONFIG_I3C_PNX_MCUX_BUS_RECOVERY
+	struct gpio_dt_spec scl_r;
+	struct gpio_dt_spec sda_r;
+#endif /* CONFIG_I3C_PNX_MCUX_BUS_RECOVERY */
 };
 
 struct mcux_i3c_data {
@@ -235,9 +264,11 @@ static void mcux_i3c_interrupt_enable(I3C_Type *base, uint32_t mask)
  */
 static bool mcux_i3c_has_error(I3C_Type *base)
 {
-	uint32_t mstatus, merrwarn;
+	uint32_t mstatus, merrwarn, mctrl;
+	
 
 	mstatus = base->MSTATUS;
+	mctrl = base->MCTRL;
 	if ((mstatus & I3C_MSTATUS_ERRWARN_MASK) == I3C_MSTATUS_ERRWARN_MASK) {
 		merrwarn = base->MERRWARN;
 
@@ -247,8 +278,8 @@ static bool mcux_i3c_has_error(I3C_Type *base)
 		 * printing any error messages should be handled in
 		 * callers of this function.
 		 */
-		LOG_DBG("ERROR: MSTATUS 0x%08x MERRWARN 0x%08x",
-			mstatus, merrwarn);
+		LOG_DBG("ERROR: MCTRL 0x%08x MSTATUS 0x%08x MERRWARN 0x%08x",
+			mctrl, mstatus, merrwarn);
 
 		return true;
 	}
@@ -568,6 +599,57 @@ static inline void mcux_i3c_wait_idle(struct mcux_i3c_data *dev_data, I3C_Type *
 }
 
 /**
+ * @brief Tell controller to flush both TX and RX FIFOs.
+ *
+ * @param base Pointer to controller registers.
+ */
+static inline void mcux_i3c_fifo_flush(I3C_Type *base)
+{
+	base->MDATACTRL = I3C_MDATACTRL_FLUSHFB_MASK | I3C_MDATACTRL_FLUSHTB_MASK;
+}
+
+/**
+ * @brief Prepare the controller for transfers.
+ *
+ * This is simply a wrapper to clear out status bits,
+ * and error bits. Also this tells the controller to
+ * flush both TX and RX FIFOs.
+ *
+ * @param base Pointer to controller registers.
+ */
+static inline void mcux_i3c_xfer_reset(I3C_Type *base)
+{
+	mcux_i3c_status_clear_all(base);
+	mcux_i3c_errwarn_clear_all_nowait(base);
+	mcux_i3c_fifo_flush(base);
+}
+
+/**
+ * @brief Drain RX FIFO.
+ *
+ * @param dev Pointer to controller device driver instance.
+ */
+static void mcux_i3c_fifo_rx_drain(const struct device *dev)
+{
+	const struct mcux_i3c_config *config = dev->config;
+	I3C_Type *base = config->base;
+	uint8_t buf;
+
+	/* Read from FIFO as long as RXPEND is set. */
+	while (mcux_i3c_status_is_set(base, I3C_MSTATUS_RXPEND_MASK)) {
+		buf = base->MRDATAB;
+	}
+}
+
+static void mcux_i3c_fifi_rx_drain_base(I3C_Type *base){
+	/* Read from FIFO as long as RXPEND is set. */
+	uint8_t buf;
+	while (mcux_i3c_status_is_set(base, I3C_MSTATUS_RXPEND_MASK)) {
+		buf = base->MRDATAB;
+	}
+}
+
+/**
  * @brief Tell controller to emit START.
  *
  * @param base Pointer to controller registers.
@@ -640,6 +722,7 @@ static inline int mcux_i3c_do_request_emit_stop(I3C_Type *base, bool wait_stop)
 		 * If there is an incoming IBI, it will get stuck forever
 		 * as state would be I3C_MSTATUS_STATE_SLVREQ.
 		 */
+		int stop_tries = 0;
 		while (reg32_test_match(&base->MSTATUS, I3C_MSTATUS_STATE_MASK,
 					I3C_MSTATUS_STATE_NORMACT)) {
 			if (mcux_i3c_has_error(base)) {
@@ -657,8 +740,25 @@ static inline int mcux_i3c_do_request_emit_stop(I3C_Type *base, bool wait_stop)
 				return -EIO;
 			}
 			k_busy_wait(10);
+			stop_tries++;
+			if (stop_tries > 10000){
+				uint32_t mstatus, merrwarn, ibirules, mctrl;
+				mstatus = base->MSTATUS;
+				merrwarn = base->MERRWARN;
+				ibirules = base->MIBIRULES;
+				mctrl = base->MCTRL;
+				LOG_DBG("Emit stop stuck in NORMACT! MCTRL 0x%08x MSTATUS 0x%08x MERRWARN 0x%08x MIBIRULES 0x%08x",
+					mctrl, mstatus, merrwarn, ibirules);
+				stop_tries = 0;
+				k_msleep(100);
+				mcux_i3c_fifi_rx_drain_base(base); //suggestion from nxp
+				mcux_i3c_fifo_flush(base);
+				// LOG_WRN("EMIT STOP return EHOSTDOWN");
+				return -EHOSTDOWN;
+			}
 		}
 	}
+	// LOG_WRN("EMIT STOP SUCCESS");
 	return 0;
 }
 
@@ -675,7 +775,7 @@ static inline int mcux_i3c_do_request_emit_stop(I3C_Type *base, bool wait_stop)
  * @param wait_stop True if need to wait for controller to be
  *                  no longer in NORMACT.
  */
-static inline void mcux_i3c_request_emit_stop(struct mcux_i3c_data *dev_data,
+static inline int mcux_i3c_request_emit_stop(struct mcux_i3c_data *dev_data,
 					      I3C_Type *base, bool wait_stop)
 {
 	size_t retries;
@@ -690,36 +790,46 @@ static inline void mcux_i3c_request_emit_stop(struct mcux_i3c_data *dev_data,
 		mcux_i3c_errwarn_clear_all_nowait(base);
 	}
 
-	/* Make sure we are in a state where we can emit STOP */
-	if (!reg32_test_match(&base->MSTATUS, I3C_MSTATUS_STATE_MASK,
-			      I3C_MSTATUS_STATE_NORMACT)) {
-		return;
-	}
-
 	retries = 0;
 	while (1) {
+		/* Make sure we are in a state where we can emit STOP */
+		if (!reg32_test_match(&base->MSTATUS, I3C_MSTATUS_STATE_MASK,
+					I3C_MSTATUS_STATE_NORMACT)) {
+			return 0;
+		}
 		int err = mcux_i3c_do_request_emit_stop(base, wait_stop);
 
 		if (err) {
-			if ((err == -ETIMEDOUT) && (++retries <= I3C_MAX_STOP_RETRIES)) {
-				LOG_WRN("Timeout on emit stop, retrying");
+			if ((err == -ETIMEDOUT || err == -EHOSTDOWN)  && (++retries <= I3C_MAX_STOP_RETRIES)) {
+				GPIO_DBG_SET(dbg_0, 1);
+				__asm("nop");
+				GPIO_DBG_SET(dbg_0, 0);
+				LOG_DBG("Timeout on emit stop, retrying");
 				continue;
 			}
-			LOG_ERR("Error waiting for stop");
-			return;
+
+			if(err == -EHOSTDOWN){
+				LOG_ERR("Error waiting for stop EHOSTDOWN");
+				return -EHOSTDOWN;
+			} else {
+				LOG_DBG("Error waiting for stop ETIMEDOUT");
+				return -ETIMEDOUT;
+			}
+
 		}
 		/*
 		 * Success. If wait_stop was true, state should now
 		 * be IDLE or possibly SLVREQ.
 		 */
 		if (retries) {
-			LOG_WRN("EMIT_STOP succeeded on %u retries", retries);
+			LOG_DBG("EMIT_STOP succeeded on %u retries", retries);
 		}
 		break;
 	}
 
 	/* Release any threads that might have been blocked waiting for IDLE */
 	k_condvar_broadcast(&dev_data->condvar);
+	return 0;
 }
 
 /**
@@ -767,48 +877,7 @@ static inline int mcux_i3c_fifo_rx_count_get(I3C_Type *base)
 	return (int)((mdatactrl & I3C_MDATACTRL_RXCOUNT_MASK) >> I3C_MDATACTRL_RXCOUNT_SHIFT);
 }
 
-/**
- * @brief Tell controller to flush both TX and RX FIFOs.
- *
- * @param base Pointer to controller registers.
- */
-static inline void mcux_i3c_fifo_flush(I3C_Type *base)
-{
-	base->MDATACTRL = I3C_MDATACTRL_FLUSHFB_MASK | I3C_MDATACTRL_FLUSHTB_MASK;
-}
 
-/**
- * @brief Prepare the controller for transfers.
- *
- * This is simply a wrapper to clear out status bits,
- * and error bits. Also this tells the controller to
- * flush both TX and RX FIFOs.
- *
- * @param base Pointer to controller registers.
- */
-static inline void mcux_i3c_xfer_reset(I3C_Type *base)
-{
-	mcux_i3c_status_clear_all(base);
-	mcux_i3c_errwarn_clear_all_nowait(base);
-	mcux_i3c_fifo_flush(base);
-}
-
-/**
- * @brief Drain RX FIFO.
- *
- * @param dev Pointer to controller device driver instance.
- */
-static void mcux_i3c_fifo_rx_drain(const struct device *dev)
-{
-	const struct mcux_i3c_config *config = dev->config;
-	I3C_Type *base = config->base;
-	uint8_t buf;
-
-	/* Read from FIFO as long as RXPEND is set. */
-	while (mcux_i3c_status_is_set(base, I3C_MSTATUS_RXPEND_MASK)) {
-		buf = base->MRDATAB;
-	}
-}
 
 /**
  * @brief Find a registered I3C target device.
@@ -847,7 +916,13 @@ static int mcux_i3c_recover_bus(const struct device *dev)
 	 * target initiated IBIs.
 	 */
 	if (mcux_i3c_state_get(base) == I3C_MSTATUS_STATE_NORMACT) {
-		mcux_i3c_request_emit_stop(dev->data, base, true);
+		if (mcux_i3c_request_emit_stop(dev->data, base, true) == -EHOSTDOWN){
+			//TODO this is recursive??
+			LOG_ERR("mcux_i3c_recover_bus blocked emmitting stop EHOSTDOWN!...HW recover");
+			i3c_hw_recover_bus(dev);
+			LOG_ERR("attempting emit stop again");
+			mcux_i3c_request_emit_stop(dev->data, base, true);
+		}
 	};
 
 	/* Exhaust all target initiated IBI */
@@ -906,15 +981,23 @@ static int mcux_i3c_do_one_xfer_read(I3C_Type *base, uint8_t *buf, uint8_t buf_s
 			if (mcux_i3c_fifo_rx_count_get(base) == 0) {
 				break;
 			}
+			GPIO_DBG_SET(dbg_1, 1);
 			buf[offset++] = (uint8_t)base->MRDATAB;
+			GPIO_DBG_SET(dbg_1, 0);
 		}
-
 		/*
 		 * If controller says timed out, we abort the transaction.
 		 */
+
 		if (mcux_i3c_has_error(base)) {
 			if (mcux_i3c_error_is_timeout(base)) {
-				ret = -ETIMEDOUT;
+				LOG_DBG("Flushing fifo due to timeout offset=%d, buf_sz=%d", offset, buf_sz);
+				mcux_i3c_fifo_flush(base); //nxp succestion to add
+				if (buf_sz > 0 && buf_sz == offset && buf_sz <= 16){ //assuming 16bytes of FIFO
+					LOG_DBG("Ignoring the timeout because we still read all %d bytes of the data", buf_sz);
+				} else {
+					ret = -ETIMEDOUT;
+				}
 			}
 			/* clear error  */
 			base->MERRWARN = base->MERRWARN;
@@ -928,7 +1011,7 @@ static int mcux_i3c_do_one_xfer_read(I3C_Type *base, uint8_t *buf, uint8_t buf_s
 				break;
 			} else {
 				if (ret == -ETIMEDOUT) {
-					LOG_ERR("Timeout error");
+					LOG_DBG("do_one_xfer_read Timeout error");
 				}
 				goto one_xfer_read_out;
 			}
@@ -1005,6 +1088,8 @@ static int mcux_i3c_do_one_xfer(I3C_Type *base, struct mcux_i3c_data *data,
 				bool no_ending)
 {
 	int ret = 0;
+	int key = 0;
+	int stop_err = 0;
 
 	mcux_i3c_status_clear_all(base);
 	mcux_i3c_errwarn_clear_all_nowait(base);
@@ -1023,6 +1108,8 @@ static int mcux_i3c_do_one_xfer(I3C_Type *base, struct mcux_i3c_data *data,
 		goto out_one_xfer;
 	}
 
+	// GPIO_DBG_SET(dbg_2, 1);
+	key = irq_lock();
 	if (is_read) {
 		ret = mcux_i3c_do_one_xfer_read(base, buf, buf_sz, false);
 	} else {
@@ -1030,6 +1117,10 @@ static int mcux_i3c_do_one_xfer(I3C_Type *base, struct mcux_i3c_data *data,
 	}
 
 	if (ret < 0) {
+		GPIO_DBG_SET(dbg_0, 1);
+		__asm("nop");
+		GPIO_DBG_SET(dbg_0, 0);
+		LOG_WRN("error from transfer is_read=%d, ret=%d", is_read, ret);
 		goto out_one_xfer;
 	}
 
@@ -1049,12 +1140,34 @@ static int mcux_i3c_do_one_xfer(I3C_Type *base, struct mcux_i3c_data *data,
 	}
 
 	if (mcux_i3c_has_error(base)) {
-		ret = -EIO;
+		if (reg32_test(&base->MERRWARN, I3C_MERRWARN_TIMEOUT_MASK)) {
+			// GPIO_DBG_SET(dbg_0, 1);
+			// __asm("nop");
+			// GPIO_DBG_SET(dbg_0, 0);
+			LOG_DBG("Ignoreing timeout after transaction has finished");
+			mcux_i3c_errwarn_clear_all_nowait(base);
+			// mcux_i3c_recover_bus(base);
+			// ret = -ETIMEDOUT;
+		} else {
+			ret = -EIO;
+		}
 	}
 
 out_one_xfer:
+	// k_sched_unlock();
+	irq_unlock(key);
+	// GPIO_DBG_SET(dbg_2, 0);
+
 	if (emit_stop) {
-		mcux_i3c_request_emit_stop(data, base, true);
+		if ((stop_err = mcux_i3c_request_emit_stop(data, base, true)) < 0){
+			// LOG_ERR("STOP ERROR = %d", stop_err);
+			if (stop_err == -EHOSTDOWN){
+				LOG_DBG("RETURN EHOSTDOWN");
+				ret = stop_err;
+			} else {
+				LOG_DBG("Don't return stop error return previous error = %d", ret);
+			}
+		}
 	}
 
 	return ret;
@@ -1170,7 +1283,10 @@ static int mcux_i3c_transfer(const struct device *dev,
 	ret = 0;
 
 out_xfer_i3c_stop_unlock:
-	mcux_i3c_request_emit_stop(dev_data, base, true);
+	if ((ret = mcux_i3c_request_emit_stop(dev_data, base, true)) == -EHOSTDOWN){
+		LOG_WRN("PNX, mcux_i3c_transfer, This is a good place to recover from error, ret = %d", ret);
+		i3c_hw_recover_bus(dev);
+	}
 	mcux_i3c_errwarn_clear_all_nowait(base);
 	mcux_i3c_status_clear_all(base);
 	k_mutex_unlock(&dev_data->lock);
@@ -1828,7 +1944,26 @@ static void mcux_i3c_isr(const struct device *dev)
 		}
 	}
 #else
-	ARG_UNUSED(dev);
+	const struct mcux_i3c_config *config = dev->config;
+	I3C_Type *base = config->base;
+	/* clear the flag still */
+	if (mcux_i3c_status_is_set(base, I3C_MSTATUS_SLVSTART_MASK)) {
+
+		/* Clear SLVSTART interrupt */
+		base->MSTATUS = I3C_MSTATUS_SLVSTART_MASK;
+
+		/*
+		 * Disable further target initiated IBI interrupt
+		 * while we try to service the current one.
+		 */
+		base->MINTCLR = I3C_MINTCLR_SLVSTART_MASK;
+
+		LOG_WRN("IBI isr triggered while CONFIG_I3C_USE_IBI=n...clearing it");
+	} else {
+		uint32_t mstatus;
+		mstatus = base->MSTATUS;
+		LOG_DBG("ISR Triggered for unhandled reason, status=0x%08x", mstatus);
+	}
 #endif
 }
 
@@ -1964,6 +2099,30 @@ static int mcux_i3c_init(const struct device *dev)
 		goto err_out;
 	}
 
+	//Phantom debug init
+#ifdef CONFIG_I3C_MCUX_GPIO_DGB
+	if (!device_is_ready(dbg_0.port) || !device_is_ready(dbg_1.port) || !device_is_ready(dbg_2.port)) {
+		LOG_ERR("Phantom Debug outputs not ready!");
+	} else {
+		if( gpio_pin_configure_dt(&dbg_0, GPIO_OUTPUT_INACTIVE) < 0 
+			|| gpio_pin_configure_dt(&dbg_1, GPIO_OUTPUT_INACTIVE) < 0 
+			|| gpio_pin_configure_dt(&dbg_2, GPIO_OUTPUT_INACTIVE) < 0 ){
+			LOG_ERR("Phantom Debug could not configure outputs");
+		} 
+#ifdef CONFIG_I3C_MCUX_GPIO_DGB_EN_REQ		
+		else {
+			LOG_INF("Attemping Debug 0,1 Pins Enabled via pin 2");
+			if(gpio_pin_set_dt(&dbg_2, 1) != 0){
+				LOG_ERR("Error Debug 0,1 Pins Enabled via pin 2");
+			}
+		}
+#endif
+	}
+
+#endif
+
+	//END Phantom debug init
+
 	k_mutex_init(&data->lock);
 	k_condvar_init(&data->condvar);
 
@@ -2016,6 +2175,123 @@ static int mcux_i3c_init(const struct device *dev)
 err_out:
 	return ret;
 }
+
+#if CONFIG_I3C_PNX_MCUX_BUS_RECOVERY
+static void pnx_mcux_i3c_bitbang_set_scl(void *io_context, int state)
+{
+	const struct mcux_i3c_config *config = io_context;
+
+	gpio_pin_set_dt(&config->scl_r, state);
+}
+
+static void pnx_mcux_i3c_bitbang_set_sda(void *io_context, int state)
+{
+	const struct mcux_i3c_config *config = io_context;
+
+	gpio_pin_set_dt(&config->sda_r, state);
+}
+
+static int pnx_mcux_i3c_bitbang_get_sda(void *io_context)
+{
+	const struct mcux_i3c_config *config = io_context;
+
+	return gpio_pin_get_dt(&config->sda_r) == 0 ? 0 : 1;
+}
+
+static int pnx_mcux_i3c_recover_bus(const struct device *dev)
+{
+	const struct mcux_i3c_config *config = dev->config;
+	struct mcux_i3c_data *data = dev->data;
+	I3C_Type *base = config->base;
+	struct i2c_bitbang bitbang_ctx;
+	struct i2c_bitbang_io bitbang_io = {
+		.set_scl = pnx_mcux_i3c_bitbang_set_scl,
+		.set_sda = pnx_mcux_i3c_bitbang_set_sda,
+		.get_sda = pnx_mcux_i3c_bitbang_get_sda,
+	};
+	uint32_t bitrate_cfg;
+	int error = 0;
+
+	LOG_WRN("pnx_mcux_i3c_recover_bus ... using i2c bus reovery!!!!");
+
+	int ret = 0;
+
+	k_msleep(1);
+
+	if (!gpio_is_ready_dt(&config->scl_r)) {
+		LOG_ERR("SCL GPIO device not ready");
+		return -EIO;
+	}
+
+	if (!gpio_is_ready_dt(&config->sda_r)) {
+		LOG_ERR("SDA GPIO device not ready");
+		return -EIO;
+	}
+
+	k_mutex_lock(&data->lock, K_FOREVER);
+
+	error = gpio_pin_configure_dt(&config->scl_r, GPIO_OUTPUT_HIGH);
+	if (error != 0) {
+		LOG_ERR("failed to configure SCL GPIO (err %d)", error);
+		goto restore;
+	}
+
+	error = gpio_pin_configure_dt(&config->sda_r, GPIO_OUTPUT_HIGH);
+	if (error != 0) {
+		LOG_ERR("failed to configure SDA GPIO (err %d)", error);
+		goto restore;
+	}
+
+	i2c_bitbang_init(&bitbang_ctx, &bitbang_io, (void *)config);
+
+	struct i3c_config_controller *ctrl_config = &data->common.ctrl_config;
+
+	bitrate_cfg = i2c_map_dt_bitrate(ctrl_config->scl.i2c) | I2C_MODE_CONTROLLER;
+	error = i2c_bitbang_configure(&bitbang_ctx, bitrate_cfg);
+	if (error != 0) {
+		LOG_ERR("failed to configure I2C bitbang (err %d)", error);
+		goto restore;
+	}
+
+	error = i2c_bitbang_recover_bus(&bitbang_ctx);
+	if (error != 0) {
+		LOG_ERR("failed to recover bus (err %d)", error);
+		goto restore;
+	}
+
+restore:
+	(void)pinctrl_apply_state(config->pincfg, PINCTRL_STATE_DEFAULT);
+
+	LOG_WRN("pnx_mcux_i3c_recover_bus .. Done i2c recovery!");
+
+	if((error = mcux_i3c_init(dev)) != 0){
+		LOG_ERR("could not reiniitialize i3c device err = %d", error);
+	}
+	k_msleep(100);
+
+	//Testing reg recovery
+	mcux_i3c_request_emit_stop(data, base, false);
+
+	//4/1 added wauting for done
+	/* Wait for controller to say the operation is done */
+	ret = mcux_i3c_status_wait_clear_timeout(base, I3C_MSTATUS_MCTRLDONE_MASK,
+				1000);
+
+	uint32_t mstatus = base->MSTATUS;
+	uint32_t mctrl = base->MCTRL;
+	if (ret != 0) {
+		LOG_WRN("waiting for ctrl done failed err = %d, MCTRL 0x%08x MSTATUS 0x%08x", ret, mctrl, mstatus);
+	} else {
+		LOG_WRN("emit stop no_wait and wait for done success, MCTRL 0x%08x MSTATUS 0x%08x", mctrl, mstatus);
+	} //end added 4/1
+	mcux_i3c_xfer_reset(base);
+	mcux_i3c_request_emit_stop(data, base, true);
+
+	k_mutex_unlock(&data->lock);
+
+	return error;
+}
+#endif /* CONFIG_I3C_MCUX_PNX_BUS_RECOVERY */
 
 static int mcux_i3c_i2c_api_configure(const struct device *dev, uint32_t dev_config)
 {
@@ -2082,7 +2358,10 @@ static int mcux_i3c_i2c_api_transfer(const struct device *dev,
 	ret = 0;
 
 out_xfer_i2c_stop_unlock:
-	mcux_i3c_request_emit_stop(dev_data, base, true);
+	if ((ret = mcux_i3c_request_emit_stop(dev_data, base, true)) == -EHOSTDOWN){
+		LOG_WRN("PNX, mcux_i3c_i2c_api_transfer, This is a good place to recover from error, ret = %d", ret);
+		i3c_hw_recover_bus(dev);
+	}
 	mcux_i3c_errwarn_clear_all_nowait(base);
 	mcux_i3c_status_clear_all(base);
 	k_mutex_unlock(&dev_data->lock);
@@ -2118,7 +2397,19 @@ static DEVICE_API(i3c, mcux_i3c_driver_api) = {
 #ifdef CONFIG_I3C_RTIO
 	.iodev_submit = i3c_iodev_submit_fallback,
 #endif
+
+#ifdef CONFIG_I3C_HW_RECOVER
+	.hw_recover = pnx_mcux_i3c_recover_bus,
+#endif
 };
+
+#if CONFIG_I3C_PNX_MCUX_BUS_RECOVERY
+#define I3C_PNX_MCUX_SCL_INIT(id) .scl_r = GPIO_DT_SPEC_INST_GET_OR(id, scl_gpios, {0}),
+#define I3C_PNX_MCUX_SDA_INIT(id) .sda_r = GPIO_DT_SPEC_INST_GET_OR(id, sda_gpios, {0}),
+#else
+#define I3C_PNX_MCUX_SCL_INIT(id)
+#define I3C_PNX_MCUX_SDA_INIT(id)
+#endif /* CONFIG_I3C_PNX_MCUX_BUS_RECOVERY */
 
 #define I3C_MCUX_DEVICE(id)							\
 	PINCTRL_DT_INST_DEFINE(id);						\
@@ -2138,6 +2429,8 @@ static DEVICE_API(i3c, mcux_i3c_driver_api) = {
 		.common.dev_list.i2c = mcux_i3c_i2c_device_array_##id,			\
 		.common.dev_list.num_i2c = ARRAY_SIZE(mcux_i3c_i2c_device_array_##id),	\
 		.pincfg = PINCTRL_DT_INST_DEV_CONFIG_GET(id),			\
+		I3C_PNX_MCUX_SCL_INIT(id) \
+		I3C_PNX_MCUX_SDA_INIT(id) \
 		.disable_open_drain_high_pp =					\
 			DT_INST_PROP(id, disable_open_drain_high_pp),		\
 	};									\

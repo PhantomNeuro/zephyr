@@ -206,8 +206,8 @@ static int mcux_lpc_rtc_init(const struct device *dev)
 
 	RTC_Init(config->base);
 
-	/* Issue a software reset to set the registers to init state */
-	RTC_Reset(config->base);
+	// /* Issue a software reset to set the registers to init state */
+	// RTC_Reset(config->base);
 
 	config->irq_config_func(dev);
 
